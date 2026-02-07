@@ -56,7 +56,7 @@ export default function PrivacyPage() {
             <section>
               <h2 className="text-lg font-semibold text-gray-800 mb-3">6. 政策更新</h2>
               <p>
-                我们可能会不时更新本隐私政策。任何更改都会在本页面上发布，并更新"最后更新"日期。
+                我们可能会不时更新本隐私政策。任何更改都会在本页面上发布，并更新&ldquo;最后更新&rdquo;日期。
               </p>
             </section>
 

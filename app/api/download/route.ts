@@ -1,15 +1,99 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import path from 'path';
-import fs from 'fs/promises';
-import {
-  generateToken,
-  generateSessionId,
-  storeDownload,
-} from '@/lib/download-manager';
 
-const execAsync = promisify(exec);
+const XHS_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+  'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+  'Referer': 'https://www.xiaohongshu.com/',
+};
+
+/**
+ * Extract video URL from XHS page
+ */
+async function extractVideoUrl(url: string): Promise<{
+  videoUrl: string;
+  title: string;
+  author: string;
+}> {
+  // Follow redirects to get the final URL
+  const response = await fetch(url, {
+    headers: XHS_HEADERS,
+    redirect: 'follow',
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch page: ${response.status}`);
+  }
+
+  const html = await response.text();
+
+  // Try to extract video URL from the page
+  // Method 1: Look for video URL in JSON-LD or initial state data
+  const stateMatch = html.match(/__INITIAL_STATE__\s*=\s*({.+?})\s*<\/script>/s);
+  if (stateMatch) {
+    try {
+      // Clean up the JSON string (XHS uses undefined which isn't valid JSON)
+      const cleanJson = stateMatch[1]
+        .replace(/undefined/g, 'null')
+        .replace(/\n/g, '');
+      const state = JSON.parse(cleanJson);
+
+      // Navigate the state object to find video info
+      const noteData = state?.note?.noteDetailMap;
+      if (noteData) {
+        const noteId = Object.keys(noteData)[0];
+        const note = noteData[noteId]?.note;
+        if (note) {
+          const video = note.video;
+          const title = note.title || note.desc || '小红书视频';
+          const author = note.user?.nickname || '未知';
+
+          if (video) {
+            // Try different video URL sources
+            const videoUrl =
+              video.consumer?.originVideoKey
+                ? `https://sns-video-bd.xhscdn.com/${video.consumer.originVideoKey}`
+                : video.media?.stream?.h264?.[0]?.masterUrl
+                  || video.media?.stream?.h265?.[0]?.masterUrl
+                  || video.media?.stream?.av1?.[0]?.masterUrl
+                  || '';
+
+            if (videoUrl) {
+              return { videoUrl, title, author };
+            }
+          }
+        }
+      }
+    } catch {
+      // JSON parse failed, try other methods
+    }
+  }
+
+  // Method 2: Look for video meta tags
+  const ogVideoMatch = html.match(/<meta\s+property="og:video"\s+content="([^"]+)"/);
+  if (ogVideoMatch) {
+    const title = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/)?.[1] || '小红书视频';
+    return { videoUrl: ogVideoMatch[1], title, author: '未知' };
+  }
+
+  // Method 3: Look for video source in HTML
+  const videoSrcMatch = html.match(/<video[^>]*src="([^"]+)"/);
+  if (videoSrcMatch) {
+    const title = html.match(/<title>([^<]+)<\/title>/)?.[1] || '小红书视频';
+    return { videoUrl: videoSrcMatch[1], title, author: '未知' };
+  }
+
+  // Method 4: Look for video URLs in script tags
+  const videoKeyMatch = html.match(/"originVideoKey"\s*:\s*"([^"]+)"/);
+  if (videoKeyMatch) {
+    const videoUrl = `https://sns-video-bd.xhscdn.com/${videoKeyMatch[1]}`;
+    const title = html.match(/"title"\s*:\s*"([^"]+)"/)?.[1] || '小红书视频';
+    const author = html.match(/"nickname"\s*:\s*"([^"]+)"/)?.[1] || '未知';
+    return { videoUrl, title, author };
+  }
+
+  throw new Error('无法从页面中提取视频链接，该内容可能不是视频或链接已失效');
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -17,145 +101,48 @@ export async function POST(request: NextRequest) {
 
     if (!url) {
       return NextResponse.json(
-        { error: '請提供視頻鏈接' },
+        { error: '请提供视频链接' },
         { status: 400 }
       );
     }
 
-    // 驗證URL格式
-    if (!url.includes('xiaohongshu.com')) {
+    // Validate URL format - accept xiaohongshu.com and xhslink.com (share links)
+    if (!url.includes('xiaohongshu.com') && !url.includes('xhslink.com')) {
       return NextResponse.json(
-        { error: '請提供有效的小紅書鏈接' },
+        { error: '请提供有效的小红书链接' },
         { status: 400 }
       );
     }
 
-    // Generate unique session ID
-    const sessionId = generateSessionId();
-    console.log(`[Download] Starting download for session ${sessionId}`);
-
-    // Create temp directory for this session
-    const tempDir = path.join(process.cwd(), 'temp', sessionId, 'Download');
-    await fs.mkdir(tempDir, { recursive: true });
-
-    // Python腳本路徑
-    const pythonPath = path.join(
-      'C:',
-      'Users',
-      'kin16',
-      'Documents',
-      '爬蟲',
-      'XHS-Downloader-master',
-      'venv',
-      'Scripts',
-      'python.exe'
-    );
-
-    const scriptPath = path.join(
-      'C:',
-      'Users',
-      'kin16',
-      'Documents',
-      '爬蟲',
-      'XHS-Downloader-master',
-      'download_video_simple.py'
-    );
-
-    // 構建命令 - 使用自定義輸出目錄
-    const command = `"${pythonPath}" "${scriptPath}" "${url}" -o "${tempDir}"`;
-
-    console.log('[Download] Executing command:', command);
-
-    // 執行下載
-    const { stdout, stderr } = await execAsync(command, {
-      timeout: 60000, // 60秒超時
-    });
-
-    if (stderr && stderr.includes('錯誤')) {
-      console.error('[Download] Error:', stderr);
-      return NextResponse.json(
-        {
-          success: false,
-          error: '下載失敗',
-          details: stderr
-        },
-        { status: 500 }
-      );
-    }
-
-    // 解析輸出，提取下載信息
-    const titleMatch = stdout.match(/標題: (.+)/);
-    const authorMatch = stdout.match(/作者: (.+)/);
-    const typeMatch = stdout.match(/類型: (.+)/);
-
-    const metadata = {
-      title: titleMatch ? titleMatch[1].trim() : '未知',
-      author: authorMatch ? authorMatch[1].trim() : '未知',
-      type: typeMatch ? typeMatch[1].trim() : '未知',
-    };
-
-    // Find the downloaded video file
-    const files = await fs.readdir(tempDir);
-    const videoFile = files.find(file => file.endsWith('.mp4'));
-
-    if (!videoFile) {
-      console.error('[Download] No video file found in temp directory');
-      return NextResponse.json(
-        {
-          success: false,
-          error: '下載失敗：未找到視頻文件',
-        },
-        { status: 500 }
-      );
-    }
-
-    const filePath = path.join(tempDir, videoFile);
-    console.log(`[Download] Video file found: ${filePath}`);
-
-    // Generate download token
-    const token = generateToken();
-    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes
-
-    // Store download info
-    storeDownload(token, {
-      filePath,
-      metadata,
-      expiresAt,
-      sessionId,
-    });
-
-    console.log(`[Download] Download ready - token: ${token}, session: ${sessionId}`);
+    const result = await extractVideoUrl(url);
 
     return NextResponse.json({
       success: true,
-      token,
-      metadata,
+      videoUrl: result.videoUrl,
+      metadata: {
+        title: result.title,
+        author: result.author,
+        type: '视频',
+      },
     });
-
-  } catch (error: any) {
-    console.error('[Download] API Error:', error);
-
-    if (error.killed) {
-      return NextResponse.json(
-        { error: '下載超時，請稍後重試' },
-        { status: 408 }
-      );
-    }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : '未知错误';
+    console.error('[Download] API Error:', message);
 
     return NextResponse.json(
       {
-        error: '服務器錯誤',
-        details: error.message
+        success: false,
+        error: message,
       },
       { status: 500 }
     );
   }
 }
 
-// 健康檢查端點
+// Health check endpoint
 export async function GET() {
   return NextResponse.json({
     status: 'ok',
-    message: '下載服務運行正常'
+    message: '下载服务运行正常',
   });
 }

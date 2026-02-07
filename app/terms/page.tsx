@@ -17,7 +17,7 @@ export default function TermsPage() {
             <section>
               <h2 className="text-lg font-semibold text-gray-800 mb-3">1. 服务说明</h2>
               <p>
-                小红书视频下载器（以下简称"本服务"）是一个免费的在线视频下载工具。使用本服务即表示您同意遵守以下条款。
+                小红书视频下载器（以下简称&ldquo;本服务&rdquo;）是一个免费的在线视频下载工具。使用本服务即表示您同意遵守以下条款。
               </p>
             </section>
 
@@ -53,7 +53,7 @@ export default function TermsPage() {
             <section>
               <h2 className="text-lg font-semibold text-gray-800 mb-3">5. 免责声明</h2>
               <p>
-                本服务按"现状"提供，不提供任何明示或暗示的保证。我们不对以下情况承担责任：
+                本服务按&ldquo;现状&rdquo;提供，不提供任何明示或暗示的保证。我们不对以下情况承担责任：
               </p>
               <ul className="list-disc list-inside mt-2 space-y-1">
                 <li>服务中断或不可用</li>
